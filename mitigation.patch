@@ -1,0 +1,74 @@
+diff --git a/bl2/bl2_main.c b/bl2/bl2_main.c
+index 923a554fb..dee0c4e08 100644
+--- a/bl2/bl2_main.c
++++ b/bl2/bl2_main.c
+@@ -21,6 +21,8 @@
+ #include <lib/pmf/pmf.h>
+ #include <plat/common/platform.h>
+ 
++#include <stdint.h>
++
+ #include "bl2_private.h"
+ 
+ #ifdef __aarch64__
+@@ -79,6 +81,36 @@ void bl2_setup(u_register_t arg0, u_register_t arg1, u_register_t arg2,
+ }
+ #endif /* RESET_TO_BL2 */
+ 
++/* This is Proof of Concept code. Real code would read the current live memory
++   map to determine the L0 mapped regions to scan. */
++#define PLAT_ALIAS_DRAM0_START 0x080000000
++#define PLAT_ALIAS_DRAM0_END   0x100000000
++#define PLAT_ALIAS_DRAM1_START 0x880000000
++#define PLAT_ALIAS_DRAM1_END   0xfff7fffff
++#define PLAT_ALIAS_PAGE_SIZE   0x1000
++const uint64_t bl2_alias_magic = 0xF0CACC1AF0CACC1A;
++
++int bl2_alias_scan_region(void* region_start, void* region_end) {
++  for (uint64_t* test = (uint64_t*)region_start; (void*)test < region_end; test += (PLAT_ALIAS_PAGE_SIZE / sizeof(uint64_t))) {
++    if ((uint64_t)test % 0x2000000 == 0) {
++      NOTICE("BL2: at %p\n", test);
++    }
++    if (*test == bl2_alias_magic && (void*)test != (void*)PLAT_ALIAS_DRAM0_START) {
++      return 1;
++    }
++  }
++  return 0;
++}
++
++int bl2_alias_check(void) {
++  NOTICE("BL2: Searching for aliased memory...\n");
++  NOTICE("BL2: using magic 0x%zx\n", bl2_alias_magic);
++  *(uint64_t*)PLAT_ALIAS_DRAM0_START = bl2_alias_magic;
++  return bl2_alias_scan_region((void*)PLAT_ALIAS_DRAM0_START, (void*)PLAT_ALIAS_DRAM0_END) ||
++    bl2_alias_scan_region((void*)PLAT_ALIAS_DRAM1_START, (void*)PLAT_ALIAS_DRAM1_END);
++  return 0;
++}
++
+ /*******************************************************************************
+  * The only thing to do in BL2 is to load further images and pass control to
+  * next BL. The memory occupied by BL2 will be reclaimed by BL3x stages. BL2
+@@ -98,6 +130,11 @@ void bl2_main(void)
+ 	/* Perform remaining generic architectural setup in S-EL1 */
+ 	bl2_arch_setup();
+ 
++    if (bl2_alias_check()) {
++      ERROR("Aliasing detected!\n");
++      panic();
++    }
++
+ #if PSA_FWU_SUPPORT
+ 	fwu_init();
+ #endif /* PSA_FWU_SUPPORT */
+diff --git a/plat/nxp/common/setup/ls_common.c b/plat/nxp/common/setup/ls_common.c
+index 28d6b7266..27e152603 100644
+--- a/plat/nxp/common/setup/ls_common.c
++++ b/plat/nxp/common/setup/ls_common.c
+@@ -208,6 +208,7 @@ void ls_setup_page_tables(uintptr_t total_base,
+ 	mmap_add_region(total_base, total_base,
+ 			total_size,
+ 			MT_MEMORY | MT_RW | MT_SECURE);
++    mmap_add_region(0x880000000, 0x880000000, 0x77F7FF000, MT_MEMORY | MT_RW | MT_SECURE);
+ 
+ 	/* Re-map the code section */
+ 	VERBOSE("Code region: %p - %p\n",

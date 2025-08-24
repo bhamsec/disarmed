@@ -1,0 +1,96 @@
+--- qemu/util/mmap-alloc.c      2025-03-26 19:37:01.000000000 +0000
++++ qemu-patched/util/mmap-alloc.c      2025-04-24 17:48:48.625198332 +0100
+@@ -244,6 +244,63 @@ static inline size_t mmap_guard_pagesize
+ #endif
+ }
+ 
++void *qemu_ram_mmap_aliased(int fd,
++                            size_t size,
++                            size_t align,
++                            uint32_t qemu_map_flags,
++                            off_t map_offset)
++{
++    const size_t guard_pagesize = mmap_guard_pagesize(fd);
++    size_t offset, total;
++    void *guardptr;
++
++    /*
++     * Note: this always allocates at least one extra page of virtual address
++     * space, even if size is already aligned.
++     */
++    total = size + align;
++
++    guardptr = mmap_reserve(total, fd);
++    if (guardptr == MAP_FAILED) {
++        return MAP_FAILED;
++    }
++
++    assert(is_power_of_2(align));
++    /* Always align to host page size */
++    assert(align >= guard_pagesize);
++
++    offset = QEMU_ALIGN_UP((uintptr_t)guardptr, align) - (uintptr_t)guardptr;
++    fprintf(stderr, "allocating aliased memory, size 0x%zx!\n", size);
++    size_t real_size = size / 2;
++    int memfd = memfd_create("aliased_memory", 0);
++    if (memfd == -1) {
++        fprintf(stderr, "memfd_create failed!\n");
++        return MAP_FAILED;
++    }
++
++    if (ftruncate(memfd, real_size) == -1) {
++        fprintf(stderr, "ftruncate failed!\n");
++        return MAP_FAILED;
++    }
++
++    void *ptr = mmap(guardptr + offset, real_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_SHARED, memfd, 0);
++    if (ptr == MAP_FAILED) {
++        fprintf(stderr, "mmap failed!\n");
++        return MAP_FAILED;
++    }
++    volatile void *alias = mmap(ptr + real_size, real_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_SHARED|MAP_FIXED, memfd, 0);
++    if (alias == MAP_FAILED) {
++        fprintf(stderr, "alias mmap failed!\n");
++        return MAP_FAILED;
++    }
++
++    *((char*)alias + 0x40) = 0xa5;
++
++    fprintf(stderr, "ptr: %p real_size: 0x%zx ptr + real_size: %p alias: %p, guard: %c\n", ptr, real_size, ptr + real_size, alias, *((char*)alias + 0x40));
++
++    return ptr;
++}
++
+ void *qemu_ram_mmap(int fd,
+                     size_t size,
+                     size_t align,
+diff -urp qemu/util/oslib-posix.c qemu-patched/util/oslib-posix.c
+--- qemu/util/oslib-posix.c     2025-03-26 19:37:01.000000000 +0000
++++ qemu-patched/util/oslib-posix.c     2025-05-19 14:13:30.757567320 +0100
+@@ -188,6 +188,12 @@ fail_close:
+     return false;
+ }
+ 
++extern void *qemu_ram_mmap_aliased(int fd,
++                                   size_t size,
++                                   size_t align,
++                                   uint32_t qemu_map_flags,
++                                   off_t map_offset);
++
+ /* alloc shared memory pages */
+ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared,
+                           bool noreserve)
+@@ -195,7 +201,12 @@ void *qemu_anon_ram_alloc(size_t size, u
+     const uint32_t qemu_map_flags = (shared ? QEMU_MAP_SHARED : 0) |
+                                     (noreserve ? QEMU_MAP_NORESERVE : 0);
+     size_t align = QEMU_VMALLOC_ALIGN;
+-    void *ptr = qemu_ram_mmap(-1, size, align, qemu_map_flags, 0);
++    void *ptr;
++    if (size >= 0x40000000 /* 1G */) {
++        ptr = qemu_ram_mmap_aliased(-1, size, align, qemu_map_flags, 0);
++    } else {
++        ptr = qemu_ram_mmap(-1, size, align, qemu_map_flags, 0);
++    }
+ 
+     if (ptr == MAP_FAILED) {
+         return NULL;
