@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # pycryptodome
-from Crypto.PublicKey import RSA
+from Cryptodome.PublicKey import RSA
 
 # this retrieves a 4096-bit rsa private key. to add one to the tee:
 # alias p11="pkcs11-tool --module /usr/lib/libckteec.so"
